@@ -1,6 +1,7 @@
 //! Copy a directory to another location using globs to filter the files and directories to copy.
 use std::{
     collections::{HashMap, HashSet},
+    fs::{File},
     path::{Path, PathBuf},
 };
 
@@ -382,14 +383,34 @@ where
         fs_err::remove_file(&to)?;
     }
 
+    tracing::info!("copying {:?} -> {:?}", from.to_str().unwrap_or("<unknown_file>"), to.as_ref().to_str().unwrap_or("unknown_file"));
+
     // Reflink or copy the file
-    if (reflink_copy::reflink_or_copy(from, &to)?).is_none() {
-        // File has been reflinked, on Linux we need to copy the permissions
-        #[cfg(target_os = "linux")]
-        {
+    let link_copy_status = reflink_copy::reflink_or_copy(from, &to);
+    #[cfg(target_os = "linux")]
+    match link_copy_status {
+        Ok(None) => {
+            tracing::warn!("file has been reflinked, on linux we copy the perms");
+            // File has been reflinked, on Linux we need to copy the permissions
             let metadata = fs_err::metadata(from)?;
             let permissions = metadata.permissions();
             fs_err::set_permissions(to, permissions)?;
+        },
+        Ok(Some(_)) => {
+            tracing::warn!("file has been copied, on linux we copy the times");
+            // The file has been copied, on Linux we need to copy the times
+            let metadata = fs_err::metadata(from)?;
+            let times_status = File::options()
+                .write(true)
+                .open(&to)?
+                .set_modified(metadata.modified()?);
+            if times_status.is_err() {
+                tracing::error!("unable to update modified times on {:?}!", to.as_ref().to_str().unwrap_or("<unknown_file>"));
+            }
+        },
+        Err(e) => {
+            tracing::error!("unable to reflink or copy {:?} -> {:?} : {:?}", from.to_str().unwrap_or("<unknown_file>"), to.as_ref().to_str().unwrap_or("<unknown_file>"), e);
+            return Err(e);
         }
     }
 
